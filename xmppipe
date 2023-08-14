@@ -15,7 +15,7 @@ use JSON;
 use vars qw/ %opts /;
 
 our $opts;
- 
+
 my $appname = "xmppipe";
 my $version = "0.0.1";
 my $loglevel = 1;
@@ -263,7 +263,7 @@ sub main
 	drop_privs() if ($debug == 0);
 
 	$xmpp = new Net::Jabber::Component();
- 
+
 	$xmpp->SetCallBacks(
 		onauth => \&xmpp_auth,
 		presence => \&xmpp_presence,
