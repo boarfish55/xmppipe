@@ -1,0 +1,400 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+use Sys::Syslog qw(:DEFAULT setlogsock :macros);
+use Config::General;
+use POSIX qw(setsid);
+use Net::Jabber;
+use IO::Socket::UNIX;
+use Errno qw(EINTR);
+use Data::Dumper;
+use Getopt::Std;
+use JSON;
+use vars qw/ %opts /;
+
+our $opts;
+ 
+my $appname = "xmppipe";
+my $version = "0.0.1";
+my $loglevel = 1;
+my $confpath = "/etc/xmppipe.conf";
+my %conf;
+my $pid_file_path = "/var/run/$appname.pid";
+my $socket_path = "/var/run/$appname.sock";
+my $unpriv_uid;
+my $unpriv_gid;
+my $reload = 0;
+my $debug = 0;
+my $xmpp;
+
+sub logger
+{
+	my ($level, @args) = @_;
+	my $message = join("", @args);
+
+	if ($debug == 1) {
+		print(STDERR "$appname: $message\n");
+	} else {
+		syslog($level, $message);
+	}
+}
+
+sub log_fatal
+{
+	my $msg = shift;
+	logger("crit", $msg);
+	exit(1);
+}
+
+sub sigterm_handler
+{
+	logger("notice", "caught signal, exiting");
+	$xmpp->Disconnect();
+	exit(0);
+}
+
+sub sighup_handler
+{
+	logger("notice", "reloading configuration after signal");
+	$reload = 1;
+	$! = EINTR;
+}
+
+sub load_config
+{
+	my $config = new Config::General(-ConfigFile => $confpath,
+		-LowerCaseNames => 1, -AutoTrue => 1) or
+		log_fatal("failed to load config $confpath");
+	%conf = $config->getall();
+	$pid_file_path = $conf{'pid_file_path'} if (defined($conf{'pid_file_path'}));
+	$socket_path = $conf{'socket_path'} if (defined($conf{'socket_path'}));
+	$loglevel = $conf{'log_level'} if (defined($conf{'log_level'}));
+
+	if (defined($conf{'uid'})) {
+		$unpriv_uid = getpwnam($conf{'uid'});
+	} else {
+		$unpriv_uid = getpwnam($appname);
+	}
+
+	if (defined($conf{'gid'})) {
+		$unpriv_gid = getgrnam($conf{'gid'});
+	} else {
+		$unpriv_gid = getgrnam($appname);
+	}
+
+	if (!defined($unpriv_uid) || !defined($unpriv_gid)) {
+		log_fatal("missing uid or gid");
+	}
+}
+
+sub xmpp_iq
+{
+	my $sid = shift;
+	my $iq = shift;
+
+	logger("debug", "xmpp_iq: ", $iq->GetXML());
+
+	my $reply = $iq->Reply();
+	if ($iq->GetQueryXMLNS() ne "http://jabber.org/protocol/disco#info") {
+		logger("debug", "not handling " . $iq->GetQueryXMLNS());
+		$xmpp->Send($reply);
+		return;
+	}
+
+	my $q = $reply->GetQuery();
+
+	my $ident = $q->AddIdentity();
+	$ident->SetCategory('gateway');
+	$ident->SetType('sms');
+	$ident->SetName($reply->GetFrom());
+
+	my $feature = $q->AddFeature();
+	$feature->SetVar('http://jabber.org/protocol/disco#info');
+
+	# And maybe, if we can (though not at first, not sure voip.ms can)):
+	#   <feature var='urn:xmpp:receipts'/>
+
+	logger("debug", "xmpp_iq: sending: " . $reply->GetXML());
+
+	$xmpp->Send($reply);
+}
+
+sub xmpp_presence
+{
+	my $sid = shift;
+	my $presence = shift;
+
+	logger("debug", "got presence update type ". $presence->GetType());
+
+	if ($presence->GetType() eq "subscribe") {
+		my $reply = $presence->Reply(type => 'subscribed');
+		$xmpp->Send($reply);
+	} elsif ($presence->GetType() eq "unsubscribe") {
+		my $reply = $presence->Reply(type => 'unsubscribed');
+		$xmpp->Send($reply);
+	} elsif ($presence->GetType() eq "probe") {
+		$xmpp->Send($presence->Reply());
+	} else {
+		logger("debug", "got presence update" .
+				" from=" . $presence->GetFrom() .
+				", type=" . $presence->GetType() .
+				", show=" . $presence->GetShow() .
+				", status=" . $presence->GetStatus());
+	}
+}
+
+sub xmpp_message
+{
+	my $sid = shift;
+	my $message = shift;
+
+	my $msg = {};
+	$msg->{'sid'} = $sid;
+	$msg->{'to'} = $message->GetTo();
+	$msg->{'from'} = $message->GetFrom();
+	$msg->{'type'} = $message->GetType();
+	$msg->{'subject'} = $message->GetSubject();
+	$msg->{'body'} = $message->GetBody();
+	$msg->{'thread'} = $message->GetThread();
+	$msg->{'timestamp'} = $message->GetTimeStamp();
+	$msg->{'error'} = $message->GetError();
+	$msg->{'error_code'} = $message->GetErrorCode();
+
+	# TODO: fork & pipe here.
+	my $j = to_json($msg, {utf8 => 1, pretty => 1});
+	print(Dumper($j));
+}
+
+sub xmpp_auth
+{
+	logger("info", "connected and authenticated");
+}
+
+sub drop_privs
+{
+	logger("debug", "dropping privs: uid => $unpriv_uid, gid => $unpriv_gid");
+	$) = $unpriv_gid;
+	$( = $unpriv_gid;
+	$> = $unpriv_uid;
+	$< = $unpriv_uid;
+}
+
+sub daemonize
+{
+	umask(022);
+	chdir('/') or
+		log_fatal("chdir(): $!");
+	open(STDIN, q{<}, '/dev/null') or
+		log_fatal("can't read /dev/null: $!");
+	open(STDOUT, q{>}, '/dev/null') or
+		log_fatal("can't write to /dev/null: $!");
+	open(STDERR, q{>}, '/dev/null') or
+		log_fatal("can't write to /dev/null: $!");
+
+	my $pid = fork();
+
+	log_fatal("fork(): $!") if (!defined($pid));
+
+	exit(0) if ($pid > 0);
+
+	open(my $pid_file, ">", $pid_file_path) or
+		log_fatal("failed to create PID file: $pid_file_path: $!");
+	print($pid_file "$$\n");
+	close($pid_file);
+	setsid() or
+		log_fatal("setsid(): $!");
+	$0 = $appname;
+}
+
+sub usage
+{
+	print("Usage: $appname [-hdv]\n");
+	print("\t-d\t\tdebug (print errors to STDERR, stays in foreground)\n");
+	print("\t-c <path>\tspecify an alternate config path\n");
+	print("\t-v\t\tprint version\n");
+	print("\t-h\t\tprints this help\n");
+}
+
+sub main
+{
+	getopts("hdvc:", \%opts) or do {
+		usage();
+		exit(1);
+	};
+
+	if (defined($opts{'h'})) {
+		usage();
+		exit(0);
+	}
+
+	if (defined($opts{'v'})) {
+		print("$appname version $version\n");
+		exit(0);
+	}
+
+	if (defined($opts{'d'})) {
+		$debug = 1;
+	}
+
+	if (defined($opts{'c'})) {
+		$confpath = $opts{'c'};
+	}
+
+	load_config();
+
+	if ($debug == 0) {
+		daemonize();
+		openlog($appname, "ndelay,nofatal,pid", "daemon");
+		if ($loglevel == 0) {
+			setlogmask(LOG_UPTO(LOG_ERR));
+		} elsif ($loglevel == 1) {
+			setlogmask(LOG_UPTO(LOG_INFO));
+		} else {
+			setlogmask(LOG_UPTO(LOG_DEBUG));
+		}
+	}
+
+	$SIG{TERM} = \&sigterm_handler;
+	$SIG{INT} = \&sigterm_handler;
+	$SIG{HUP} = \&sighup_handler;
+
+	drop_privs() if ($debug == 0);
+
+	$xmpp = new Net::Jabber::Component();
+ 
+	$xmpp->SetCallBacks(
+		onauth => \&xmpp_auth,
+		presence => \&xmpp_presence,
+		iq => \&xmpp_iq,
+		message => \&xmpp_message);
+
+	logger("notice", "connecting to " . $conf{'xmpp_component_host'} .
+		":" . $conf{'xmpp_component_port'});
+
+	$xmpp->Connect(
+		hostname => $conf{'xmpp_component_host'},
+		componentname => $conf{'xmpp_component_name'},
+		port => $conf{'xmpp_component_port'}) or do {
+			logger("err", "component connection failed: $!");
+			return;
+		};
+
+	my @xmpp_res = $xmpp->AuthSend(
+		secret => $conf{'xmpp_component_secret'}) or do {
+			logger("err", "component auth failed: $!");
+			return;
+		};
+
+        if ($xmpp_res[0] ne "ok") {
+                logger("err", "component auth failed: $xmpp_res[0] - $xmpp_res[1]");
+                return;
+        }
+
+	# TODO: make that configurable
+	umask(0077);
+
+	unlink($conf{'socket_path'});
+	my $sock = IO::Socket::UNIX->new(
+		Type => SOCK_STREAM,
+		Local => $conf{'socket_path'},
+		Listen => 1) or
+		log_fatal("component could not open UNIX socket: $!");
+	$sock->blocking(0);
+
+	while (defined($xmpp->Process(1))) {
+		my $client_sock = $sock->accept();
+		if (!defined($client_sock)) {
+			next if ($!{EINTR} || $!{EWOULDBLOCK});
+			log_fatal("component: accept(): $!");
+		}
+
+		$client_sock->blocking(1);
+		$client_sock->setsockopt(SOL_SOCKET, SO_RCVTIMEO,
+			pack('l!l!', 1, 0)) or do {
+			logger("err", "setsockopt failed: $!");
+			next;
+		};
+
+		my $j;
+		my $r;
+		my $buffer;
+		while (defined($r = $client_sock->recv($buffer, 4096))) {
+			if (length($buffer) == 0) {
+				last;
+			}
+			$j .= $buffer;
+		};
+
+		if (!defined($r)) {
+			$client_sock->close();
+			logger("err", "recv failed: $!");
+			next;
+		}
+		$client_sock->close();
+
+		my $cmsg;
+		eval {
+			$cmsg = from_json($j, {utf8 => 1});
+		} or do {
+			logger("err", "json decode failed");
+			next;
+		};
+
+		if (!defined($cmsg->{'to'})) {
+			logger("err", "'to' not defined");
+			next;
+		}
+
+		if (!defined($cmsg->{'from'})) {
+			logger("err", "'from' not defined");
+			next;
+		}
+
+		# Make sure "from" is from our domain, else the component
+		# connection dies.
+		my @parts = split(/@/, $cmsg->{'from'});
+		if (scalar(@parts) < 2) {
+			logger("err", "'from' was missing its domain part");
+			next;
+		}
+
+		if ($parts[1] ne $conf{'xmpp_component_name'}) {
+			logger("err", "'from' had an invalid domain");
+			next;
+		}
+
+		# TODO: probably want to validate the local part as well
+
+		if (!defined($cmsg->{'body'})) {
+			logger("err", "'body' not defined");
+			next;
+		}
+
+		my $msg = Net::XMPP::Message->new();
+		$msg->SetMessage(
+			to => $cmsg->{'to'},
+			from => $cmsg->{'from'},
+			body => $cmsg->{'body'});
+
+		if (!defined($cmsg->{'type'})) {
+			$msg->SetType("chat");
+		}
+
+		if (defined($cmsg->{'subject'})) {
+			$msg->SetSubject($cmsg->{'subject'});
+		}
+
+		if (defined($cmsg->{'thread'})) {
+			$msg->SetSubject($cmsg->{'thread'});
+		}
+
+		$xmpp->Send($msg);
+	}
+
+	log_fatal("XMPP component ended unexpectedly: $!");
+}
+
+main();
+exit(0);
