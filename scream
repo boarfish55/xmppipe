@@ -1,0 +1,57 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+use Sys::Syslog qw(:DEFAULT setlogsock :macros);
+use JSON;
+
+sub logger
+{
+	my ($level, @args) = @_;
+	my $message = join("", @args);
+	syslog($level, $message);
+}
+
+sub reply_uppercase
+{
+	my $j = shift;
+
+	if (!defined($j->{'to'})) {
+		logger("err", "'to' not defined");
+		return;
+	}
+
+	if (!defined($j->{'from'})) {
+		logger("err", "'from' not defined");
+		return;
+	}
+
+	if (!defined($j->{'body'})) {
+		logger("err", "'body' not defined");
+		return;
+	}
+
+	my $from = $j->{'from'};
+	my $to = $j->{'to'};
+	$j->{'to'} = $from;
+	$j->{'from'} = $to;
+	$j->{'body'} = uc($j->{'body'});
+
+	print(to_json($j, {utf8 => 1, pretty => 1}));
+}
+
+sub main
+{
+	my $json = JSON->new();
+	$| = 1;
+	while (my $line = <STDIN>) {
+		my $j = $json->incr_parse($line) or next;
+		if (defined($j)) {
+			reply_uppercase($j);
+		}
+	}
+}
+
+main();
+exit(0);

@@ -7,7 +7,9 @@ use Sys::Syslog qw(:DEFAULT setlogsock :macros);
 use Config::General;
 use POSIX qw(setsid);
 use Net::Jabber;
-use IO::Socket::UNIX;
+use IO::Poll;
+use IPC::Open2;
+use POSIX ":sys_wait_h";
 use Errno qw(EINTR);
 use Data::Dumper;
 use Getopt::Std;
@@ -22,7 +24,9 @@ my $loglevel = 1;
 my $confpath = "/etc/xmppipe.conf";
 my %conf;
 my $pid_file_path = "/var/run/$appname.pid";
-my $socket_path = "/var/run/$appname.sock";
+my $pipe_cmd = "false";
+my $pipe_cmd_stdin;
+my $pipe_cmd_stdout;
 my $unpriv_uid;
 my $unpriv_gid;
 my $reload = 0;
@@ -69,8 +73,10 @@ sub load_config
 		log_fatal("failed to load config $confpath");
 	%conf = $config->getall();
 	$pid_file_path = $conf{'pid_file_path'} if (defined($conf{'pid_file_path'}));
-	$socket_path = $conf{'socket_path'} if (defined($conf{'socket_path'}));
 	$loglevel = $conf{'log_level'} if (defined($conf{'log_level'}));
+
+	# TODO: test if executable
+	$pipe_cmd = $conf{'pipe_cmd'} if (defined($conf{'pipe_cmd'}));
 
 	if (defined($conf{'uid'})) {
 		$unpriv_uid = getpwnam($conf{'uid'});
@@ -162,9 +168,8 @@ sub xmpp_message
 	$msg->{'error'} = $message->GetError();
 	$msg->{'error_code'} = $message->GetErrorCode();
 
-	# TODO: fork & pipe here.
 	my $j = to_json($msg, {utf8 => 1, pretty => 1});
-	print(Dumper($j));
+	print($pipe_cmd_stdin "$j\n");
 }
 
 sub xmpp_auth
@@ -215,6 +220,61 @@ sub usage
 	print("\t-c <path>\tspecify an alternate config path\n");
 	print("\t-v\t\tprint version\n");
 	print("\t-h\t\tprints this help\n");
+}
+
+sub parse_and_send_msg
+{
+	my $j = shift;
+
+	if (!defined($j->{'to'})) {
+		logger("err", "'to' not defined");
+		next;
+	}
+
+	if (!defined($j->{'from'})) {
+		logger("err", "'from' not defined");
+		next;
+	}
+
+	# Make sure "from" is from our domain, else the component
+	# connection dies.
+	my @parts = split(/@/, $j->{'from'});
+	if (scalar(@parts) < 2) {
+		logger("err", "'from' was missing its domain part");
+		next;
+	}
+
+	if ($parts[1] ne $conf{'xmpp_component_name'}) {
+		logger("err", "'from' had an invalid domain");
+		next;
+	}
+
+	# TODO: probably want to validate the local part as well
+
+	if (!defined($j->{'body'})) {
+		logger("err", "'body' not defined");
+		next;
+	}
+
+	my $msg = Net::XMPP::Message->new();
+	$msg->SetMessage(
+		to => $j->{'to'},
+		from => $j->{'from'},
+		body => $j->{'body'});
+
+	if (!defined($j->{'type'})) {
+		$msg->SetType("chat");
+	}
+
+	if (defined($j->{'subject'})) {
+		$msg->SetSubject($j->{'subject'});
+	}
+
+	if (defined($j->{'thread'})) {
+		$msg->SetSubject($j->{'thread'});
+	}
+
+	$xmpp->Send($msg);
 }
 
 sub main
@@ -279,13 +339,13 @@ sub main
 		port => $conf{'xmpp_component_port'}) or do {
 			logger("err", "component connection failed: $!");
 			return;
-		};
+	};
 
 	my @xmpp_res = $xmpp->AuthSend(
 		secret => $conf{'xmpp_component_secret'}) or do {
 			logger("err", "component auth failed: $!");
 			return;
-		};
+	};
 
         if ($xmpp_res[0] ne "ok") {
                 logger("err", "component auth failed: $xmpp_res[0] - $xmpp_res[1]");
@@ -295,102 +355,70 @@ sub main
 	# TODO: make that configurable
 	umask(0077);
 
-	unlink($conf{'socket_path'});
-	my $sock = IO::Socket::UNIX->new(
-		Type => SOCK_STREAM,
-		Local => $conf{'socket_path'},
-		Listen => 1) or
-		log_fatal("component could not open UNIX socket: $!");
-	$sock->blocking(0);
+	my $pipe_cmd_pid = open2($pipe_cmd_stdout, $pipe_cmd_stdin,
+		$conf{'pipe_cmd'}) or do {
+		log_fatal("open2: $!");
+	};
 
-	while (defined($xmpp->Process(1))) {
-		my $client_sock = $sock->accept();
-		if (!defined($client_sock)) {
-			next if ($!{EINTR} || $!{EWOULDBLOCK});
-			log_fatal("component: accept(): $!");
+	my $poll = IO::Poll->new();
+	$poll->mask($pipe_cmd_stdout => POLLIN);
+
+	my $json = JSON->new();
+
+	while (defined($xmpp->Process(0))) {
+		while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
+			my $st = ($? >> 8);
+			logger("debug", "child $pid exited ($st)");
 		}
 
-		$client_sock->blocking(1);
-		$client_sock->setsockopt(SOL_SOCKET, SO_RCVTIMEO,
-			pack('l!l!', 1, 0)) or do {
-			logger("err", "setsockopt failed: $!");
-			next;
-		};
+		if ($poll->poll(0.2) == -1) {
+			next if $!{EINTR};
+			log_fatal("poll: $!");
+		}
 
-		my $j;
-		my $r;
-		my $buffer;
-		while (defined($r = $client_sock->recv($buffer, 4096))) {
-			if (length($buffer) == 0) {
-				last;
+		for my $h ($poll->handles(POLLIN|POLLHUP)) {
+			my $buf;
+			my $r = sysread($h, $buf, 1024);
+			if (!defined($r)) {
+				next if ($!{EINTR});
+				logger("err", "read failed on pipe_cmd: $!");
+				next;
 			}
-			$j .= $buffer;
-		};
+			if ($r == 0) {
+				logger("info", "pipe command closed stdout;" .
+					" restarting");
+				$poll->remove($h);
+				close($h);
+				close($pipe_cmd_stdin);
 
-		if (!defined($r)) {
-			$client_sock->close();
-			logger("err", "recv failed: $!");
-			next;
+				$pipe_cmd_pid = open2($pipe_cmd_stdout,
+					$pipe_cmd_stdin,
+					$conf{'pipe_cmd'}) or do {
+						log_fatal("open2: $!");
+				};
+				$poll->mask($pipe_cmd_stdout => POLLIN);
+				$json = JSON->new();
+				next;
+			}
+
+			my $j;
+			eval {
+				# incr_parse returns a JSON object if there
+				# is enough bytes in the buffer, or undef.
+				# It croaks if there's a JSON parse error.
+				$j = $json->incr_parse($buf);
+			} or do {
+				logger("err", "json decode failed");
+
+				# It may be hard to recover from a corrupted
+				# JSON buffer, so just recreate it.
+				$json = JSON->new();
+				next;
+			};
+			if (defined($j)) {
+				parse_and_send_msg($j);
+			}
 		}
-		$client_sock->close();
-
-		my $cmsg;
-		eval {
-			$cmsg = from_json($j, {utf8 => 1});
-		} or do {
-			logger("err", "json decode failed");
-			next;
-		};
-
-		if (!defined($cmsg->{'to'})) {
-			logger("err", "'to' not defined");
-			next;
-		}
-
-		if (!defined($cmsg->{'from'})) {
-			logger("err", "'from' not defined");
-			next;
-		}
-
-		# Make sure "from" is from our domain, else the component
-		# connection dies.
-		my @parts = split(/@/, $cmsg->{'from'});
-		if (scalar(@parts) < 2) {
-			logger("err", "'from' was missing its domain part");
-			next;
-		}
-
-		if ($parts[1] ne $conf{'xmpp_component_name'}) {
-			logger("err", "'from' had an invalid domain");
-			next;
-		}
-
-		# TODO: probably want to validate the local part as well
-
-		if (!defined($cmsg->{'body'})) {
-			logger("err", "'body' not defined");
-			next;
-		}
-
-		my $msg = Net::XMPP::Message->new();
-		$msg->SetMessage(
-			to => $cmsg->{'to'},
-			from => $cmsg->{'from'},
-			body => $cmsg->{'body'});
-
-		if (!defined($cmsg->{'type'})) {
-			$msg->SetType("chat");
-		}
-
-		if (defined($cmsg->{'subject'})) {
-			$msg->SetSubject($cmsg->{'subject'});
-		}
-
-		if (defined($cmsg->{'thread'})) {
-			$msg->SetSubject($cmsg->{'thread'});
-		}
-
-		$xmpp->Send($msg);
 	}
 
 	log_fatal("XMPP component ended unexpectedly: $!");
