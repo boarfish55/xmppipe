@@ -9,4 +9,4 @@ xmpp_component_port 5347
 xmpp_component_host localhost
 xmpp_component_secret some-secret
 
-pipe_cmd /home/plalonde/xmppipe/scream
+pipe_cmd /home/plalonde/xmppipe/screamback

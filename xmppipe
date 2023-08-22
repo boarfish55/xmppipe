@@ -376,7 +376,7 @@ sub main
 			log_fatal("poll: $!");
 		}
 
-		for my $h ($poll->handles(POLLIN|POLLHUP)) {
+		for my $h ($poll->handles(POLLIN|POLLHUP|POLLERR|POLLNVAL)) {
 			my $buf;
 			my $r = sysread($h, $buf, 1024);
 			if (!defined($r)) {
