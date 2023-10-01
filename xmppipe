@@ -371,7 +371,7 @@ sub main
 			logger("debug", "child $pid exited ($st)");
 		}
 
-		if ($poll->poll(0.2) == -1) {
+		if ($poll->poll(0.1) == -1) {
 			next if $!{EINTR};
 			log_fatal("poll: $!");
 		}

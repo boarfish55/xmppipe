@@ -1,0 +1,308 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+use Getopt::Std;
+use Config::General;
+use IO::Poll;
+use HTTP::Daemon::SSL;
+use Data::Dumper;
+use Sys::Syslog qw(:DEFAULT setlogsock :macros);
+use POSIX ":sys_wait_h";
+use JSON;
+use vars qw/ %opts /;
+
+my $appname = "backend_voipms";
+my $version = "0.0.1";
+my $loglevel = 1;
+my $confpath = "/etc/xmppipe_voipms.conf";
+my %conf;
+my $debug = 0;
+
+our $opts;
+
+sub logger
+{
+	my ($level, @args) = @_;
+	my $message = join("", @args);
+
+	if ($debug == 1) {
+		print(STDERR "$appname: $message\n");
+	} else {
+		syslog($level, $message);
+	}
+}
+
+sub log_fatal
+{
+	my $msg = shift;
+	logger("crit", $msg);
+	exit(1);
+}
+
+sub load_config
+{
+	my $config = new Config::General(-ConfigFile => $confpath,
+		-LowerCaseNames => 1, -AutoTrue => 1) or
+		log_fatal("failed to load config $confpath");
+	%conf = $config->getall();
+	$loglevel = $conf{'log_level'} if (defined($conf{'log_level'}));
+}
+
+sub usage
+{
+	print("Usage: $appname [-hdv]\n");
+	print("\t-d\t\tdebug (print errors to STDERR, stays in foreground)\n");
+	print("\t-c <path>\tspecify an alternate config path\n");
+	print("\t-v\t\tprint version\n");
+	print("\t-h\t\tprints this help\n");
+}
+
+sub reply_uppercase
+{
+	my $j = shift;
+
+	if (!defined($j->{'to'})) {
+		logger("err", "'to' not defined");
+		return;
+	}
+
+	if (!defined($j->{'from'})) {
+		logger("err", "'from' not defined");
+		return;
+	}
+
+	if (!defined($j->{'body'})) {
+		logger("err", "'body' not defined");
+		return;
+	}
+
+	my $from = $j->{'from'};
+	my $to = $j->{'to'};
+	$j->{'to'} = $from;
+	$j->{'from'} = $to;
+	$j->{'body'} = uc($j->{'body'});
+
+	print(to_json($j, {utf8 => 1, pretty => 1}));
+}
+
+sub http_accept
+{
+	my $h = shift;
+	my $http = shift;
+	my $c = $h->accept();
+	if (!defined($c)) {
+		return if ($!{EINTR});
+		if ($!{ECONNABORTED}) {
+			logger("err", "connection aborted while while accept()'ing");
+			return;
+		}
+		my $errmsg = ($! eq "") ? IO::Socket::SSL::errstr() : $!;
+		logger("err", "accept: $errmsg");
+		return;
+	};
+
+	logger("info", "connection from " . $c->peerhost());
+
+	pipe(my $rh, my $wh) or do {
+		logger("err", "pipe: $!");
+		return;
+	};
+
+	my $pid = fork();
+	if (!defined($pid)) {
+		logger("err", "fork(): $!");
+		close($wh);
+		close($rh);
+		close($c);
+		return;
+	} elsif ($pid == 0) {
+		# TODO: can we just stop listening without destroying
+		# the entire object?
+		#$http->close();
+		close($rh);
+		handle_client($c, $wh);
+		exit(0);
+	}
+	close($wh);
+	$c->close(SSL_no_shutdown => 1);
+	return $rh;
+}
+
+sub handle_client
+{
+	my ($http_connection, $pipe) = @_;
+	my $resp;
+
+	while (my $req = $http_connection->get_request) {
+		if ($req->url->path ne '/message') {
+			my $peer = $http_connection->peerhost();
+			logger("notice", "client $peer: invalid request " .
+				$req->url->path);
+			$resp = new HTTP::Response(
+				404,
+				"Invalid request",
+				[ "Content-Type" => "text/html; charset=ascii" ],
+				"Invalid request\n");
+			$http_connection->send_response($resp);
+			next;
+		}
+
+		# TODO: handle auth
+
+		logger("debug", "Request Content-Type: " . $req->header('Content-Type'));
+		if (!defined($req->header('Content-Type')) ||
+			($req->header('Content-Type') ne
+			'application/x-www-form-urlencoded'))
+		{
+			$resp = new HTTP::Response(
+				400,
+				"Invalid request",
+				[ "Content-Type" => "text/html; charset=ascii" ],
+				"Invalid request\n");
+			$http_connection->send_response($resp);
+			next;
+		}
+
+		logger("debug", "Request content: " . Dumper($req->content));
+
+		# TODO: proper url decode
+		my %r_content = split(/[&=]/, $req->content);
+
+		my $content = {};
+
+		# TODO: need to map DIDs to JIDs
+		$content->{'to'} = "+1" . $r_content{'to'};
+		$content->{'from'} = "+1" . $r_content{'from'};
+		$content->{'body'} = $r_content{'body'};
+
+		# TODO: media URLs
+
+		print($pipe to_json($content, {utf8 => 1, pretty => 1}));
+
+		$resp = new HTTP::Response(
+			200,
+			"OK",
+			[ "Content-Type" => "text/plain" ],
+			"ok");
+		$http_connection->send_response($resp);
+	}
+	$http_connection->close();
+}
+
+sub main
+{
+	getopts("hdvc:", \%opts) or do {
+		usage();
+		exit(1);
+	};
+
+	if (defined($opts{'h'})) {
+		usage();
+		exit(0);
+	}
+
+	if (defined($opts{'v'})) {
+		print("$appname version $version\n");
+		exit(0);
+	}
+
+	if (defined($opts{'d'})) {
+		$debug = 1;
+	}
+
+	if (defined($opts{'c'})) {
+		$confpath = $opts{'c'};
+	}
+
+	load_config();
+
+	openlog($appname, "ndelay,nofatal,pid", "user");
+
+	my $http = HTTP::Daemon::SSL->new(
+		Listen => 5,
+		ReuseAddr => 1,
+		SSL_key_file => $conf{'key'},
+		SSL_cert_file => $conf{'cert'},
+		LocalAddr => $conf{'listen_address'},
+		LocalPort => $conf{'listen_port'}) or do {
+		log_fatal("HTTP daemon creation failed: $!");
+	};
+
+	logger("notice", "listening on port " . $conf{'listen_address'} .
+		":" . $conf{'listen_port'});
+
+	my $poll = IO::Poll->new();
+	$poll->mask($http => POLLIN);
+	$poll->mask(\*STDIN => POLLIN);
+
+	my $json_from_xmpp = JSON->new();
+	my $json_from_backend = JSON->new();
+	$| = 1;
+	my $shutdown = 0;
+	while ($shutdown == 0) {
+		while (my $pid = waitpid(-1, WNOHANG) > 0) {
+			my $st = ($? >> 8);
+			logger("debug", "child $pid exited ($st)");
+		}
+
+		if ($poll->poll(0.1) == -1) {
+			next if $!{EINTR};
+			log_fatal("poll: $!");
+		}
+
+		for my $h ($poll->handles(POLLIN|POLLERR|POLLHUP|POLLNVAL)) {
+			if ($h eq $http) {
+				my $rh = http_accept($http, $h);
+				next if (!defined($rh));
+				$poll->mask($rh => POLLIN);
+			} elsif ($h eq \*STDIN) {
+				my $buf;
+				my $r = sysread(STDIN, $buf, 4096);
+				if (!defined($r)) {
+					next if $!{EINTR};
+					$poll->remove($h);
+					$shutdown = 1;
+					logger("err", "failed reading " .
+						"from stdin: $!");
+					next;
+				} elsif ($r == 0) {
+					$poll->remove($h);
+					$shutdown = 1;
+					next;
+				}
+
+				my $j = $json_from_xmpp->incr_parse($buf) or
+					next;
+				if (defined($j)) {
+					# TODO: send to voip.ms
+					reply_uppercase($j);
+				}
+			} else {
+				# Any other HTTP client
+				my $rbuf;
+				my $r = sysread($h, $rbuf, 4096);
+				if (!defined($r) || $r == 0) {
+					if (!defined($r)) {
+						next if $!{EINTR};
+						logger("err", "failed reading" .
+							" from http child: $!");
+					}
+					$poll->remove($h);
+					close($h);
+					next;
+				}
+				my $j = $json_from_backend->incr_parse($rbuf) or
+					next;
+				if (defined($j)) {
+					print(to_json($j,
+						{utf8 => 1, pretty => 1}));
+				}
+			}
+		}
+	}
+}
+
+main();
+exit(0);
