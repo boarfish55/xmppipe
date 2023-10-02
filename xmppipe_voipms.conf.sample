@@ -1,5 +1,12 @@
 listen_address = 0.0.0.0
 listen_port = 5348
+my_jid = plalonde@overnet.ca
+my_did = 3475551234
+my_domain = voipms.overnet.ca
 net_timeout = 10
 key = key.pem
 cert = cert.pem
+authuser = some_user
+authpass = some_pass
+api_username = some_api_username
+api_password = some_api_password

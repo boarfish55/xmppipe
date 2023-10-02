@@ -7,6 +7,10 @@ use Getopt::Std;
 use Config::General;
 use IO::Poll;
 use HTTP::Daemon::SSL;
+use HTTP::Request::Params;
+use LWP::UserAgent;
+use URI;
+use MIME::Base64;
 use Data::Dumper;
 use Sys::Syslog qw(:DEFAULT setlogsock :macros);
 use POSIX ":sys_wait_h";
@@ -17,6 +21,7 @@ my $appname = "backend_voipms";
 my $version = "0.0.1";
 my $loglevel = 1;
 my $confpath = "/etc/xmppipe_voipms.conf";
+my $api_url = "https://voip.ms/api/v1/rest.php";
 my %conf;
 my $debug = 0;
 
@@ -59,7 +64,7 @@ sub usage
 	print("\t-h\t\tprints this help\n");
 }
 
-sub reply_uppercase
+sub voipms_send
 {
 	my $j = shift;
 
@@ -78,13 +83,59 @@ sub reply_uppercase
 		return;
 	}
 
-	my $from = $j->{'from'};
-	my $to = $j->{'to'};
-	$j->{'to'} = $from;
-	$j->{'from'} = $to;
-	$j->{'body'} = uc($j->{'body'});
+	my $url = URI->new($api_url);
 
-	print(to_json($j, {utf8 => 1, pretty => 1}));
+	my $dst = $j->{'to'};
+	$dst =~ s/\+1([0-9]+)@.*/$1/;
+
+	$url->query_form(
+		'api_username' => $conf{'api_username'},
+		'api_password' => $conf{'api_password'},
+		'did' => $conf{'my_did'},
+		'dst' => $dst,
+		'message' => $j->{'body'},
+		'method' => 'sendSMS'
+	);
+
+	my $ua = LWP::UserAgent->new();
+	$ua->agent('XMPPIPE/1.0');
+
+	my $req = new HTTP::Request(
+		'GET', $url,
+		['Accept' => '*/*']
+	);
+
+	my $pid = fork();
+	if (!defined($pid)) {
+		logger("err", "fork(): $!");
+		return;
+	} elsif ($pid > 0) {
+		return;
+	}
+
+	my $resp = $ua->request($req);
+	if (!$resp->is_success()) {
+		logger("err", "failed sending message: " .
+			$resp->decoded_content);
+		exit(1);
+	}
+
+	my $resp_j;
+	eval {
+		$resp_j = from_json($resp->content);
+		if ($resp_j->{'status'} ne "success") {
+			logger("err", "error: voip.ms status " .
+				$resp_j->{'status'});
+			exit(1);
+		}
+		logger("debug", "SMS ID " . $resp_j->{'sms'} .
+			" sent successfully");
+	} or do {
+		logger("err", "bad JSON reply from voip.ms");
+		exit(1);
+	};
+
+	exit(0);
 }
 
 sub http_accept
@@ -130,6 +181,32 @@ sub http_accept
 	return $rh;
 }
 
+sub check_auth
+{
+        my ($http_connection, $req) = @_;
+
+        my $auth = $req->header("Authorization");
+        if ($auth) {
+                $auth =~ s/Basic ([a-zA-Z0-9\+_=]+)/$1/;
+                my ($user, $pw) = split(/:/, decode_base64($auth));
+                if ($user eq $conf{'authuser'} && $pw eq $conf{'authpass'}) {
+                        return 1;
+                }
+        }
+
+        my $resp = new HTTP::Response(
+                401,
+                "Authorization Required",
+                [
+                        "Content-Type" => "text/html; charset=ascii",
+                        "WWW-Authenticate" => "Basic realm=\"Pita\""
+                ],
+                "Authorization Required\n");
+        $http_connection->send_response($resp);
+        logger("debug", "sending auth request");
+        return 0;
+}
+
 sub handle_client
 {
 	my ($http_connection, $pipe) = @_;
@@ -149,36 +226,39 @@ sub handle_client
 			next;
 		}
 
-		# TODO: handle auth
+		next if (!check_auth($http_connection, $req));
 
-		logger("debug", "Request Content-Type: " . $req->header('Content-Type'));
-		if (!defined($req->header('Content-Type')) ||
-			($req->header('Content-Type') ne
-			'application/x-www-form-urlencoded'))
-		{
-			$resp = new HTTP::Response(
-				400,
-				"Invalid request",
-				[ "Content-Type" => "text/html; charset=ascii" ],
-				"Invalid request\n");
-			$http_connection->send_response($resp);
-			next;
-		}
+		#logger("debug", "Request Content-Type: " . $req->header('Content-Type'));
+		#if (!defined($req->header('Content-Type')) ||
+		#	($req->header('Content-Type') ne
+		#	'application/x-www-form-urlencoded'))
+		#{
+		#	$resp = new HTTP::Response(
+		#		400,
+		#		"Invalid request",
+		#		[ "Content-Type" => "text/html; charset=ascii" ],
+		#		"Invalid request\n");
+		#	$http_connection->send_response($resp);
+		#	next;
+		#}
 
-		logger("debug", "Request content: " . Dumper($req->content));
+		my $parser = HTTP::Request::Params->new({
+			req => $req,
+		});
 
-		# TODO: proper url decode
-		my %r_content = split(/[&=]/, $req->content);
+		my $r_content = $parser->params;
+		logger("debug", "Request params" . Dumper($r_content));
 
 		my $content = {};
 
-		# TODO: need to map DIDs to JIDs
-		$content->{'to'} = "+1" . $r_content{'to'};
-		$content->{'from'} = "+1" . $r_content{'from'};
-		$content->{'body'} = $r_content{'body'};
+		$content->{'to'} = $conf{'my_jid'};
+		$content->{'from'} = "+1" . $r_content->{'from'} . "@" . $conf{'my_domain'};
+		$content->{'body'} = $r_content->{'message'};
+		if (defined($content->{'media'})) {
+			$content->{'media'} = $r_content->{'media'};
+		}
 
-		# TODO: media URLs
-
+		logger("debug", "forwarding to XMPP: " . Dumper($content));
 		print($pipe to_json($content, {utf8 => 1, pretty => 1}));
 
 		$resp = new HTTP::Response(
@@ -273,11 +353,15 @@ sub main
 					next;
 				}
 
-				my $j = $json_from_xmpp->incr_parse($buf) or
+				my $j;
+				eval {
+					$j = $json_from_xmpp->incr_parse($buf);
+				} or do {
+					logger("err", "bad JSON from xmppipe");
 					next;
+				};
 				if (defined($j)) {
-					# TODO: send to voip.ms
-					reply_uppercase($j);
+					voipms_send($j);
 				}
 			} else {
 				# Any other HTTP client
@@ -293,8 +377,13 @@ sub main
 					close($h);
 					next;
 				}
-				my $j = $json_from_backend->incr_parse($rbuf) or
+				my $j;
+				eval {
+					$j = $json_from_backend->incr_parse($rbuf);
+				} or do {
+					logger("err", "bad JSON from client");
 					next;
+				};
 				if (defined($j)) {
 					print(to_json($j,
 						{utf8 => 1, pretty => 1}));
