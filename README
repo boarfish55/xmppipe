@@ -1,11 +1,15 @@
 xmppipe is an XMPP component (XEP-0114) that can receive messages and
 pipe the result as a JSON format to any other binary over STDIN and send
-from external utilities over a Unix stream socket.
+over STDOUT.
 
 Notable Perl library dependencies:
-- JSON
-- Net::Jabber / Net::XMPP
 - Config::General
+- HTTP::Daemon::SSL
+- HTTP::Request::Params
+- JSON
+- LWP::UserAgent
+- Net::Jabber
+- Net::XMPP
 - Sys::Syslog
 
 Author: Pascal Lalonde <plalonde@overnet.ca>
