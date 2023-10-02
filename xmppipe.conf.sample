@@ -4,9 +4,9 @@ log_level 2
 uid prosody
 gid prosody
 
-xmpp_component_name sms-work.overnet.ca
+xmpp_component_name voipms.overnet.ca
 xmpp_component_port 5347
 xmpp_component_host localhost
 xmpp_component_secret some-secret
 
-pipe_cmd /home/plalonde/xmppipe/screamback
+pipe_cmd /home/plalonde/xmppipe/backend_voipms
