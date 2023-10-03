@@ -38,7 +38,7 @@ sub reply_uppercase
 	$j->{'from'} = $to;
 	$j->{'body'} = uc($j->{'body'});
 
-	print(to_json($j, {utf8 => 1, pretty => 1}));
+	print(to_json($j, {pretty => 1}));
 }
 
 sub main

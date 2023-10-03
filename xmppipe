@@ -168,7 +168,7 @@ sub xmpp_message
 	$msg->{'error'} = $message->GetError();
 	$msg->{'error_code'} = $message->GetErrorCode();
 
-	my $j = to_json($msg, {utf8 => 1, pretty => 1});
+	my $j = to_json($msg, {pretty => 1});
 	print($pipe_cmd_stdin "$j\n");
 }
 

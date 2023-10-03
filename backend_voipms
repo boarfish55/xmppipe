@@ -228,20 +228,6 @@ sub handle_client
 
 		next if (!check_auth($http_connection, $req));
 
-		#logger("debug", "Request Content-Type: " . $req->header('Content-Type'));
-		#if (!defined($req->header('Content-Type')) ||
-		#	($req->header('Content-Type') ne
-		#	'application/x-www-form-urlencoded'))
-		#{
-		#	$resp = new HTTP::Response(
-		#		400,
-		#		"Invalid request",
-		#		[ "Content-Type" => "text/html; charset=ascii" ],
-		#		"Invalid request\n");
-		#	$http_connection->send_response($resp);
-		#	next;
-		#}
-
 		my $parser = HTTP::Request::Params->new({
 			req => $req,
 		});
@@ -259,7 +245,7 @@ sub handle_client
 		}
 
 		logger("debug", "forwarding to XMPP: " . Dumper($content));
-		print($pipe to_json($content, {utf8 => 1, pretty => 1}));
+		print($pipe to_json($content, {pretty => 1}));
 
 		$resp = new HTTP::Response(
 			200,
@@ -385,8 +371,7 @@ sub main
 					next;
 				};
 				if (defined($j)) {
-					print(to_json($j,
-						{utf8 => 1, pretty => 1}));
+					print(to_json($j, {pretty => 1}));
 				}
 			}
 		}
