@@ -83,19 +83,39 @@ sub voipms_send
 		return;
 	}
 
+	if ($j->{'body'} eq "") {
+		logger("warning", "'body' empty, not sending");
+		return;
+	}
+
 	my $url = URI->new($api_url);
 
 	my $dst = $j->{'to'};
 	$dst =~ s/\+1([0-9]+)@.*/$1/;
 
-	$url->query_form(
-		'api_username' => $conf{'api_username'},
-		'api_password' => $conf{'api_password'},
-		'did' => $conf{'my_did'},
-		'dst' => $dst,
-		'message' => $j->{'body'},
-		'method' => 'sendSMS'
-	);
+	# If we are sending a file, 'body' will contain a single URL
+	my $is_mms = 0;
+	if ($j->{'body'} =~ /^https:\/\/[^ ]+$/) {
+		$is_mms = 1;
+		$url->query_form(
+			'api_username' => $conf{'api_username'},
+			'api_password' => $conf{'api_password'},
+			'did' => $conf{'my_did'},
+			'dst' => $dst,
+			'message' => 'media',
+			'media1' => $j->{'body'},
+			'method' => 'sendMMS'
+		);
+	} else {
+		$url->query_form(
+			'api_username' => $conf{'api_username'},
+			'api_password' => $conf{'api_password'},
+			'did' => $conf{'my_did'},
+			'dst' => $dst,
+			'message' => $j->{'body'},
+			'method' => 'sendSMS'
+		);
+	}
 
 	my $ua = LWP::UserAgent->new();
 	$ua->agent('XMPPIPE/1.0');
@@ -128,8 +148,13 @@ sub voipms_send
 				$resp_j->{'status'});
 			exit(1);
 		}
-		logger("debug", "SMS ID " . $resp_j->{'sms'} .
-			" sent successfully");
+		if ($is_mms == 1) {
+			logger("info", "MMS ID " . $resp_j->{'mms'} .
+				" sent successfully");
+		} else {
+			logger("info", "SMS ID " . $resp_j->{'sms'} .
+				" sent successfully");
+		}
 	} or do {
 		logger("err", "bad JSON reply from voip.ms");
 		exit(1);
@@ -160,6 +185,7 @@ sub http_accept
 		logger("err", "pipe: $!");
 		return;
 	};
+	$wh->autoflush(1);
 
 	my $pid = fork();
 	if (!defined($pid)) {
@@ -233,19 +259,43 @@ sub handle_client
 		});
 
 		my $r_content = $parser->params;
-		logger("debug", "Request params" . Dumper($r_content));
+		logger("debug", "Request params: " . Dumper($r_content));
+
+		if (!defined($r_content->{'from'}) || !defined($r_content->{'to'})) {
+			my $peer = $http_connection->peerhost();
+			logger("notice",
+				"client $peer: missing to/from from request");
+			$resp = new HTTP::Response(
+				404,
+				"Invalid request",
+				[ "Content-Type" => "text/html; charset=ascii" ],
+				"Invalid request\n");
+			$http_connection->send_response($resp);
+			next;
+		}
 
 		my $content = {};
 
 		$content->{'to'} = $conf{'my_jid'};
 		$content->{'from'} = "+1" . $r_content->{'from'} . "@" . $conf{'my_domain'};
-		$content->{'body'} = $r_content->{'message'};
-		if (defined($content->{'media'})) {
-			$content->{'media'} = $r_content->{'media'};
+
+		if (defined($r_content->{'message'})) {
+			$content->{'body'} = $r_content->{'message'};
+			logger("debug", "forwarding to XMPP: " . Dumper($content));
+			print($pipe to_json($content, {pretty => 1}));
 		}
 
-		logger("debug", "forwarding to XMPP: " . Dumper($content));
-		print($pipe to_json($content, {pretty => 1}));
+		if (defined($r_content->{'media'})) {
+			# voip.ms sends us media in a single 'media' arg, with
+			# comma-separate URLs
+			my @media = split(/,/, $r_content->{'media'});
+			for my $m (@media) {
+				$content->{'body'} = $m;
+				logger("debug", "forwarding to XMPP: " .
+					Dumper($content));
+				print($pipe to_json($content, {pretty => 1}));
+			}
+		}
 
 		$resp = new HTTP::Response(
 			200,
@@ -308,7 +358,7 @@ sub main
 	$| = 1;
 	my $shutdown = 0;
 	while ($shutdown == 0) {
-		while (my $pid = waitpid(-1, WNOHANG) > 0) {
+		while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
 			my $st = ($? >> 8);
 			logger("debug", "child $pid exited ($st)");
 		}
@@ -339,16 +389,15 @@ sub main
 					next;
 				}
 
-				my $j;
 				eval {
-					$j = $json_from_xmpp->incr_parse($buf);
+					$json_from_xmpp->incr_parse($buf);
+					while (my $j = $json_from_xmpp->incr_parse()) {
+						voipms_send($j);
+					}
 				} or do {
-					logger("err", "bad JSON from xmppipe");
+					logger("info", "bad JSON from xmppipe");
 					next;
 				};
-				if (defined($j)) {
-					voipms_send($j);
-				}
 			} else {
 				# Any other HTTP client
 				my $rbuf;
@@ -363,16 +412,15 @@ sub main
 					close($h);
 					next;
 				}
-				my $j;
 				eval {
-					$j = $json_from_backend->incr_parse($rbuf);
+					$json_from_backend->incr_parse($rbuf);
+					while (my $j = $json_from_backend->incr_parse()) {
+						print(to_json($j, {pretty => 1}));
+					}
 				} or do {
-					logger("err", "bad JSON from client");
+					logger("info", "bad JSON from client");
 					next;
 				};
-				if (defined($j)) {
-					print(to_json($j, {pretty => 1}));
-				}
 			}
 		}
 	}
