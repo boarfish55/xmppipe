@@ -94,6 +94,7 @@ sub voipms_send
 	$dst =~ s/\+1([0-9]+)@.*/$1/;
 
 	# If we are sending a file, 'body' will contain a single URL
+	# TODO: we may want to handle different DIDs here
 	my $is_mms = 0;
 	if ($j->{'body'} =~ /^https:\/\/[^ ]+$/) {
 		$is_mms = 1;
