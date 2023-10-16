@@ -75,7 +75,6 @@ sub load_config
 	$pid_file_path = $conf{'pid_file_path'} if (defined($conf{'pid_file_path'}));
 	$loglevel = $conf{'log_level'} if (defined($conf{'log_level'}));
 
-	# TODO: test if executable
 	$pipe_cmd = $conf{'pipe_cmd'} if (defined($conf{'pipe_cmd'}));
 
 	if (defined($conf{'uid'})) {
@@ -144,10 +143,10 @@ sub xmpp_presence
 		$xmpp->Send($presence->Reply());
 	} else {
 		logger("debug", "got presence update" .
-				" from=" . $presence->GetFrom() .
-				", type=" . $presence->GetType() .
-				", show=" . $presence->GetShow() .
-				", status=" . $presence->GetStatus());
+			" from=" . $presence->GetFrom() .
+			", type=" . $presence->GetType() .
+			", show=" . $presence->GetShow() .
+			", status=" . $presence->GetStatus());
 	}
 }
 
@@ -325,9 +324,6 @@ sub main
 	$SIG{HUP} = \&sighup_handler;
 
 	drop_privs() if ($debug == 0);
-
-	# TODO: make that configurable
-	umask(0077);
 
 	my $pipe_cmd_pid = open2($pipe_cmd_stdout, $pipe_cmd_stdin,
 		$conf{'pipe_cmd'}) or do {

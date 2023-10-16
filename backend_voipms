@@ -195,9 +195,6 @@ sub http_accept
 		close($c);
 		return;
 	} elsif ($pid == 0) {
-		# TODO: can we just stop listening without destroying
-		# the entire object?
-		#$http->close();
 		close($rh);
 		handle_client($c, $wh);
 		exit(0);
