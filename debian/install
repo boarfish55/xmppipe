@@ -1,2 +1,2 @@
 xmppipe /usr/bin
-backend_voipms /usr/bin
+backend_voipms /usr/libexec/xmppipe/backend_voipms
