@@ -1,3 +1,9 @@
+xmppipe (0.0.1-5) unstable; urgency=medium
+
+  * Fix backend path
+
+ -- Pascal Lalonde <plalonde@overnet.ca>  Mon, 30 Oct 2023 15:07:21 -0400
+
 xmppipe (0.0.1-4) unstable; urgency=medium
 
   * Move backend under /usr/libexec
