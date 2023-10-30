@@ -1,0 +1,14 @@
+Source: xmppipe
+Section: misc
+Priority: optional
+Maintainer: Pascal Lalonde <plalonde@overnet.ca>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: xmppipe
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, libconfig-general-perl, libhttp-daemon-ssl-perl, libhttp-request-params-perl, libjson-perl, libnet-jabber-perl, libnet-xmpp-perl
+Description: An XMPP component that pipes messages to other commands
+  An XMPP component (XEP-0114) that can receive messages and pipe the result as
+  a JSON format to any other binary over STDIN and send over STDOUT.
