@@ -1,3 +1,9 @@
+xmppipe (0.0.1-2) unstable; urgency=medium
+
+  * Arch should be all, since we have no binaries
+
+ -- Pascal Lalonde <plalonde@overnet.ca>  Mon, 30 Oct 2023 14:57:51 -0400
+
 xmppipe (0.0.1-1) unstable; urgency=medium
 
   * Initial release
