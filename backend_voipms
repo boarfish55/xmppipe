@@ -18,7 +18,7 @@ use JSON;
 use vars qw/ %opts /;
 
 my $appname = "backend_voipms";
-my $version = "0.0.1";
+my $version = "0.0.2";
 my $loglevel = 1;
 my $confpath = "/etc/xmppipe_voipms.conf";
 my $api_url = "https://voip.ms/api/v1/rest.php";
