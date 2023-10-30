@@ -29,7 +29,6 @@ my $pipe_cmd_stdin;
 my $pipe_cmd_stdout;
 my $unpriv_uid;
 my $unpriv_gid;
-my $reload = 0;
 my $debug = 0;
 my $xmpp;
 
@@ -57,13 +56,6 @@ sub sigterm_handler
 	logger("notice", "caught signal, exiting");
 	$xmpp->Disconnect();
 	exit(0);
-}
-
-sub sighup_handler
-{
-	logger("notice", "reloading configuration after signal");
-	$reload = 1;
-	$! = EINTR;
 }
 
 sub load_config
@@ -280,54 +272,12 @@ sub parse_and_send_msg
 	$xmpp->Send($msg);
 }
 
-sub main
+sub run
 {
-	getopts("hdvc:", \%opts) or do {
-		usage();
-		exit(1);
-	};
-
-	if (defined($opts{'h'})) {
-		usage();
-		exit(0);
-	}
-
-	if (defined($opts{'v'})) {
-		print("$appname version $version\n");
-		exit(0);
-	}
-
-	if (defined($opts{'d'})) {
-		$debug = 1;
-	}
-
-	if (defined($opts{'c'})) {
-		$confpath = $opts{'c'};
-	}
-
-	load_config();
-
-	if ($debug == 0) {
-		daemonize();
-		openlog($appname, "ndelay,nofatal,pid", "daemon");
-		if ($loglevel == 0) {
-			setlogmask(LOG_UPTO(LOG_ERR));
-		} elsif ($loglevel == 1) {
-			setlogmask(LOG_UPTO(LOG_INFO));
-		} else {
-			setlogmask(LOG_UPTO(LOG_DEBUG));
-		}
-	}
-
-	$SIG{TERM} = \&sigterm_handler;
-	$SIG{INT} = \&sigterm_handler;
-	$SIG{HUP} = \&sighup_handler;
-
-	drop_privs() if ($debug == 0);
-
 	my $pipe_cmd_pid = open2($pipe_cmd_stdout, $pipe_cmd_stdin,
 		$conf{'pipe_cmd'}) or do {
-		log_fatal("open2: $!");
+		logger("err", "open2: $!");
+		return;
 	};
 
 	$xmpp = new Net::Jabber::Component();
@@ -345,22 +295,34 @@ sub main
 		hostname => $conf{'xmpp_component_host'},
 		componentname => $conf{'xmpp_component_name'},
 		port => $conf{'xmpp_component_port'}) or do {
-			log_fatal("component connection failed: $!");
+			logger("err", "component connection failed: $!");
+			close($pipe_cmd_stdout);
+			close($pipe_cmd_stdin);
+			return;
 	};
 
 	my @xmpp_res = $xmpp->AuthSend(
 		secret => $conf{'xmpp_component_secret'}) or do {
-			log_fatal("component auth failed: $!");
+			logger("err", "component auth failed: $!");
+			close($pipe_cmd_stdout);
+			close($pipe_cmd_stdin);
+			return;
 	};
 
 	if ($xmpp_res[0] ne "ok") {
-		log_fatal("component auth failed: $xmpp_res[0] " .
+		logger("err", "component auth failed: $xmpp_res[0] " .
 			"- $xmpp_res[1]");
+		close($pipe_cmd_stdout);
+		close($pipe_cmd_stdin);
+		return;
 	}
 
 	my $xmpp_pid = fork();
 	if (!defined($xmpp_pid)) {
-		log_fatal("fork: $!");
+		logger("err", "fork: $!");
+		close($pipe_cmd_stdout);
+		close($pipe_cmd_stdin);
+		return;
 	} elsif ($xmpp_pid == 0) {
 		close($pipe_cmd_stdout);
 		$0 = $appname . ": processor";
@@ -423,7 +385,57 @@ sub main
 		}
 	}
 
-	log_fatal("XMPP component ended unexpectedly: $!");
+	logger("err", "XMPP component ended unexpectedly");
+}
+
+sub main
+{
+	getopts("hdvc:", \%opts) or do {
+		usage();
+		exit(1);
+	};
+
+	if (defined($opts{'h'})) {
+		usage();
+		exit(0);
+	}
+
+	if (defined($opts{'v'})) {
+		print("$appname version $version\n");
+		exit(0);
+	}
+
+	if (defined($opts{'d'})) {
+		$debug = 1;
+	}
+
+	if (defined($opts{'c'})) {
+		$confpath = $opts{'c'};
+	}
+
+	load_config();
+
+	if ($debug == 0) {
+		daemonize();
+		openlog($appname, "ndelay,nofatal,pid", "daemon");
+		if ($loglevel == 0) {
+			setlogmask(LOG_UPTO(LOG_ERR));
+		} elsif ($loglevel == 1) {
+			setlogmask(LOG_UPTO(LOG_INFO));
+		} else {
+			setlogmask(LOG_UPTO(LOG_DEBUG));
+		}
+	}
+
+	$SIG{TERM} = \&sigterm_handler;
+	$SIG{INT} = \&sigterm_handler;
+
+	drop_privs() if ($debug == 0);
+
+	while (1) {
+		run();
+		sleep(1);
+	}
 }
 
 main();

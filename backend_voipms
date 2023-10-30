@@ -107,6 +107,16 @@ sub voipms_send
 			'media1' => $j->{'body'},
 			'method' => 'sendMMS'
 		);
+	} elsif (length($j->{'body'}) > 140) {
+		$is_mms = 1;
+		$url->query_form(
+			'api_username' => $conf{'api_username'},
+			'api_password' => $conf{'api_password'},
+			'did' => $conf{'my_did'},
+			'dst' => $dst,
+			'message' => $j->{'body'},
+			'method' => 'sendMMS'
+		);
 	} else {
 		$url->query_form(
 			'api_username' => $conf{'api_username'},
