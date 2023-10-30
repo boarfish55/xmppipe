@@ -1,3 +1,10 @@
+xmppipe (0.0.2-1) unstable; urgency=medium
+
+  v0.0.2
+  * Fix loglevels
+
+ -- Pascal Lalonde <plalonde@overnet.ca>  Mon, 30 Oct 2023 15:39:14 -0400
+
 xmppipe (0.0.1-5) unstable; urgency=medium
 
   * Fix backend path
