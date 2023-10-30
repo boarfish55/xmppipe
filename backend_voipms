@@ -18,7 +18,7 @@ use JSON;
 use vars qw/ %opts /;
 
 my $appname = "backend_voipms";
-my $version = "0.0.1";
+my $version = "0.0.2";
 my $loglevel = 1;
 my $confpath = "/etc/xmppipe_voipms.conf";
 my $api_url = "https://voip.ms/api/v1/rest.php";
@@ -342,7 +342,16 @@ sub main
 
 	load_config();
 
-	openlog($appname, "ndelay,nofatal,pid", "user");
+	openlog($appname, "ndelay,nofatal,pid", "daemon");
+	if ($debug == 0) {
+		if ($loglevel == 0) {
+			setlogmask(LOG_UPTO(LOG_ERR));
+		} elsif ($loglevel == 1) {
+			setlogmask(LOG_UPTO(LOG_INFO));
+		} else {
+			setlogmask(LOG_UPTO(LOG_DEBUG));
+		}
+	}
 
 	my $http = HTTP::Daemon::SSL->new(
 		Listen => 5,
